@@ -2,7 +2,7 @@
    استراتيجية: network-first لصفحة التطبيق نفسها (تحصل دائماً على أحدث نسخة أونلاين)،
    مع سقوط تلقائي للنسخة المخزّنة أوفلاين. باقي الملفات (أيقونات، خطوط) cache-first. */
 
-const CACHE = 'mizaj-v1';
+const CACHE = 'mizaj-v2';
 const APP_SHELL = [
   './',
   './index.html',
