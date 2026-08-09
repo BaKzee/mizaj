@@ -553,6 +553,9 @@ bdi{unicode-bidi:isolate}
 <!-- RECIPES -->
 <main class="screen" id="screen-recipes"></main>
 
+<!-- LIVE SESSION (separate screen so recipes stay browsable) -->
+<main class="screen" id="screen-session"></main>
+
 <!-- LOG -->
 <main class="screen" id="screen-log"></main>
 
@@ -584,10 +587,20 @@ const TABS=[
  {k:'recipes',t:'الوصفات',i:'<rect x="4" y="6" width="16" height="3" rx="1.5"/><rect x="4" y="11" width="11" height="3" rx="1.5"/><rect x="4" y="16" width="7" height="3" rx="1.5"/>'},
  {k:'log',t:'سجلي',i:'<path d="M4 19V5"/><path d="M8 19v-6M13 19V9M18 19v-9"/>'},
 ];
-document.getElementById('tabbar').innerHTML=TABS.map((t,i)=>
- `<button class="tab${i===0?' active':''}" data-tab="${t.k}"><span class="ember-dot"></span>
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${t.i}</svg>
-  <span>${t.t}</span></button>`).join('');
+const SESSION_TAB = {k:'session',t:'الجلسة',i:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>'};
+function renderTabs(){
+  let hasSes = false;
+  try { hasSes = !!(STATE && STATE.session); } catch { hasSes = false; }
+  const list = hasSes ? TABS.slice(0,4).concat([SESSION_TAB], TABS.slice(4)) : TABS;
+  const cur = document.querySelector('.screen.active');
+  const curKey = cur ? cur.id.replace('screen-','') : 'home';
+  document.getElementById('tabbar').innerHTML = list.map(t=>
+   `<button class="tab${t.k===curKey?' active':''}" data-tab="${t.k}"><span class="ember-dot"></span>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${t.i}</svg>
+    <span>${t.t}</span></button>`).join('');
+  document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>goTo(t.dataset.tab));
+}
+renderTabs();
 function goTo(n){
   localStorage.setItem('mizaj:lastTab', n);
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===n));
@@ -604,7 +617,6 @@ function goTo(n){
     next.classList.add('active');
   },{once:true});
 }
-document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>goTo(t.dataset.tab));
 (function restoreLastTab(){
   const saved = localStorage.getItem('mizaj:lastTab');
   if(!saved || saved==='home' || !TABS.some(t=>t.k===saved))return;
@@ -668,7 +680,7 @@ function renderList(){
   const q=query.trim().toLowerCase();
   let list=DATA.flavors.filter(f=>
     (activeFam==='all'||f.family===activeFam) &&
-    (!q||f.name.toLowerCase().includes(q)||f.brand.toLowerCase().includes(q)||(f.note||'').includes(query.trim()))
+    (!q||f.name.toLowerCase().includes(q)||f.brand.toLowerCase().includes(q)||f.subfamily.includes(query.trim())||(f.note||'').includes(query.trim())||(f.official||'').toLowerCase().includes(q))
   );
   if(!list.length){bodyEl.innerHTML='<div class="empty">لا نتيجة مطابقة.<br>جرّب اسماً أو براند آخر.</div>';return;}
   let html='';
@@ -786,9 +798,26 @@ function openSheet(id){
    <div style="display:flex;gap:10px;margin-top:18px">
      <button class="btn ghost" id="fvText">عدّل النصوص</button>
      <button class="btn solid" id="fvTin">المخزون · ${invPct(f.id)}%</button>
+     ${f.userAdded ? '<button class="btn ghost" id="fvDel" style="flex-basis:100%;margin-top:10px;color:var(--danger)">احذف هذه النكهة</button>' : ''}
    </div>`;
   setTimeout(()=>{
     const a=document.getElementById('fvText'), b=document.getElementById('fvTin');
+    const del=document.getElementById('fvDel');
+    if(del) del.onclick=()=>{
+      const used=allRecipes().filter(r=>recipeItems(r).some(i=>i.f.id===f.id));
+      pushSheetView(()=>openSheet(f.id));
+      confirmSheet('حذف النكهة',
+        `«${f.name}» ستُختفي من مكتبتك ومن مخزونك.${used.length?` تستخدمها ${used.length} وصفة — ستبقى الوصفات لكن هذه النكهة ستظهر ناقصة فيها.`:''} لا يمكن التراجع.`,
+        'احذف', ()=>{
+          DATA.flavors = DATA.flavors.filter(x=>x.id!==f.id);
+          STATE.userFlavors = (STATE.userFlavors||[]).filter(x=>x.id!==f.id);
+          delete STATE.inventory[f.id];
+          if (STATE.flavorEdits) delete STATE.flavorEdits[f.id];
+          BUILD.picks = BUILD.picks.filter(p=>p.f.id!==f.id);
+          save(true); closeSheet(); renderChips(); renderList(); renderBuild(); renderLog();
+          toast(`حُذفت «${f.name}»`);
+        });
+    };
     if(a) a.onclick=()=>{pushSheetView(()=>openSheet(id));openFlavorEdit(f.id);};
     if(b) b.onclick=()=>{pushSheetView(()=>openSheet(id));openTin(f.id);};
     const WHY={
@@ -1316,12 +1345,53 @@ let bQuery = '', bPickerOpen = false;
 
 function sevColor(s) { return s === 'r' ? 'var(--danger)' : s === 'o' ? 'var(--warn)' : 'var(--f-base)'; }
 
+/* Canonical connector types. Any flavour whose name carries one of these
+   tokens is treated as a bridge/support — including tins bought later, which
+   pick up the role automatically instead of landing as an unclassified main.
+   Percentages are NOT set here: every flavour keeps its own documented
+   window, so a pure coolant tagged here is still capped at 5% by law six. */
+const BRIDGE_TYPES = [
+  { token: 'vanilla',     ar: 'فانيليا' },
+  { token: 'white grape', ar: 'عنب أبيض' },
+  { token: 'green grape', ar: 'عنب أخضر' },
+  { token: 'coconut',     ar: 'جوز هند' },
+  { token: 'mint',        ar: 'نعناع' },
+  { token: 'rose',        ar: 'ورد' },
+  { token: 'cream',       ar: 'كريمة' },
+  { token: 'milk',        ar: 'حليب' },
+  { token: 'lychee',      ar: 'ليتشي' },
+];
+const bridgeTypeOf = name => {
+  const n = (name || '').toLowerCase();
+  return BRIDGE_TYPES.find(t => n.includes(t.token)) || null;
+};
+/* Adds the connector roles without disturbing the flavour's existing role,
+   so a "main" that is also a natural bridge keeps both. */
+function applyBridgeRole(f) {
+  if (!f || !f.roles) return false;
+  if (!bridgeTypeOf(f.name)) return false;
+  // a one-flavour complete recipe is never a connector, whatever its name says
+  if (f.roles.includes('complete')) return false;
+  let changed = false;
+  ['bridge', 'support'].forEach(role => {
+    if (!f.roles.includes(role)) { f.roles.push(role); changed = true; }
+  });
+  return changed;
+}
+function applyBridgeRolesToLibrary() { DATA.flavors.forEach(applyBridgeRole); }
+
 const BRIDGE_NAMES = ['White Grape', 'Vanilla', 'Coconut Ice-Cream'];
+function bridgePct(f) {
+  const w = windowFor(f);
+  const want = Math.min(Math.max(15, w.lo), w.hi);
+  return Math.max(w.lo, Math.floor(want / STEP) * STEP);
+}
+
 function findBridgeSuggestion() {
   const inMix = new Set(BUILD.picks.map(p => p.f.id));
   for (const name of BRIDGE_NAMES) {
     const f = DATA.flavors.find(x => x.name.includes(name) && !inMix.has(x.id));
-    if (f) return { f, pct: 15, kind: 'universal' };
+    if (f) return { f, pct: bridgePct(f), kind: 'universal' };
   }
   // النكهات الجسرية الثلاث كلها مستخدَمة أو غير مناسبة — نستخدم مصفوفة التوافق
   // لنقترح نكهة بدور جسر/داعم تناسب كل عائلات المزيج الحالي فعليًا.
@@ -1334,7 +1404,7 @@ function findBridgeSuggestion() {
     const avg = mixFamilies.reduce((s, fam) => s + (DATA.familyMatrix[f.family]?.[fam] ?? 0), 0) / mixFamilies.length;
     if (avg > bestScore) { bestScore = avg; best = f; }
   }
-  if (best && bestScore >= 3.5) return { f: best, pct: Math.max(best.minPct || 15, 15), kind: 'matrix' };
+  if (best && bestScore >= 3.5) return { f: best, pct: bridgePct(best), kind: 'matrix' };
   return null;
 }
 
@@ -1350,9 +1420,17 @@ function renderBuild() {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
         <input id="bq" type="search" placeholder="ابحث عن نكهة البداية…" autocomplete="off" value="${bQuery}">
       </div>
-      <div id="bList"></div>`;
+      <div id="bList"></div>
+      ${STATE.myRecipes && STATE.myRecipes.length ? `
+        <div class="section-label" style="margin-top:20px">وصفاتي المحفوظة (${STATE.myRecipes.length})</div>
+        ${STATE.myRecipes.map(r => `<div class="flav" data-myopen="${RKEY(r)}">
+          <span class="stripe" style="background:${catColor(r.category || 'من تصميمي')}"></span>
+          <span class="main"><span class="nm"><span class="rno num">${rNum(r)}</span><bdi>${r.name}</bdi></span>
+            <span class="meta">${(r.items || []).map(i => (DATA.flavors.find(f => f.id === i.id) || {}).name).filter(Boolean).join(' · ')}</span></span>
+        </div>`).join('')}` : ''}`;
     wireSearch();
     renderStarters();
+    bScreen.querySelectorAll('[data-myopen]').forEach(b => b.onclick = () => { clearSheetStack(); openRecipe(b.dataset.myopen); });
     return;
   }
 
@@ -1443,8 +1521,8 @@ function renderBuild() {
   document.getElementById('bReset').onclick = () => { BUILD.picks = []; bQuery = ''; renderBuild(); };
   document.getElementById('bSave').onclick = openSaveRecipe;
   bScreen.querySelectorAll('[data-delr]').forEach(b => b.onclick = () => {
-    const i = STATE.myRecipes.findIndex(r => r.id === b.dataset.delr);
-    if (i > -1) { const n = STATE.myRecipes[i].name; STATE.myRecipes.splice(i, 1); save(true); toast(`حُذفت «${n}»`); renderBuild(); }
+    const r = STATE.myRecipes.find(x => x.id === b.dataset.delr);
+    if (r) { clearSheetStack(); confirmDelete(RKEY(r)); }
   });
   bScreen.querySelectorAll('[data-bowl]').forEach(b => b.onclick = () => {
     STATE.settings.bowlG = +b.dataset.bowl; save(); renderBuild();
@@ -1488,17 +1566,30 @@ function matchQ(f) {
   return !q || f.name.toLowerCase().includes(q) || f.subfamily.includes(bQuery.trim()) || f.brand.toLowerCase().includes(q);
 }
 
+const STARTER_RANK = f =>
+  f.roles.includes('base') ? 0 : f.roles.includes('main') ? 1 : f.roles.includes('complete') ? 2 :
+  (f.roles.includes('bridge') || f.roles.includes('support')) ? 3 :
+  (f.roles.includes('flavoredCool') || f.roles.includes('pureCool')) ? 4 : 5;
+const STARTER_LABEL = ['قاعدة — الأنسب للبدء','رئيسية — الأنسب للبدء','وصفة كاملة بنكهة واحدة','جسر أو داعم','تبريد','لمسة'];
+
 function renderStarters() {
   const el = document.getElementById('bList'); if (!el) return;
-  const list = DATA.flavors.filter(f => matchQ(f) &&
-    (f.roles.includes('base') || f.roles.includes('main'))).slice(0, 40);
-  el.innerHTML = list.length ? list.map(f => `
+  // every flavor stays selectable; ranking just puts the natural starters on top
+  const list = DATA.flavors.filter(matchQ)
+    .sort((a, b) => (STARTER_RANK(a) - STARTER_RANK(b)) || (b.idealPct - a.idealPct));
+  let lastRank = -1;
+  el.innerHTML = list.length ? list.map(f => {
+    const rk = STARTER_RANK(f);
+    const head = rk !== lastRank ? `<div class="section-label" style="margin-top:${lastRank === -1 ? '2px' : '14px'}">${STARTER_LABEL[rk]}</div>` : '';
+    lastRank = rk;
+    return head + `
     <div class="flav" data-pick="${f.id}">
       <span class="stripe" style="background:${famColor(f.family)}"></span>
       <span class="main"><span class="nm"><bdi>${f.name}</bdi></span>
         <span class="meta">${f.subfamily} · ${FAM_AR[f.family]}</span></span>
       <span class="pct">${f.idealPct}%</span>
-    </div>`).join('') : '<div class="empty">لا نتيجة.</div>';
+    </div>`;
+  }).join('') : '<div class="empty">لا نتيجة.</div>';
   el.querySelectorAll('[data-pick]').forEach(x => x.onclick = () => {
     const f = DATA.flavors.find(y => y.id === x.dataset.pick);
     BUILD.picks = [{ f, pct: Math.min(f.idealPct, 45) }];
@@ -1534,7 +1625,7 @@ function renderCandidates() {
   let html = open.length ? open.map(r => row(r, false)).join('')
     : `<div class="empty">لا خيار متاح.<br>جرّب خفض نسبة النكهة المهيمنة أو حذف آخر إضافة.</div>`;
   if (shut.length) html += `<div class="section-label">ممنوعة — فشل حسي موثّق (${shut.length})</div>` +
-    shut.slice(0, 25).map(r => row(r, true)).join('');
+    shut.map(r => row(r, true)).join('');
   el.innerHTML = html;
 
   el.querySelectorAll('[data-add]').forEach(x => x.onclick = () => {
@@ -1553,9 +1644,12 @@ renderBuild();
    prompt/alert/confirm are blocked inside sandboxed frames, so every
    dialog here is built from real DOM. -------------------------------- */
 function nextSpecialNo() {
-  const used = DATA.recipes.filter(r => r.special).map(r => r.special)
-    .concat((STATE.myRecipes || []).map(r => r.special || 0));
-  return Math.max(0, ...used) + 1;
+  const used = new Set(DATA.recipes.filter(r => r.special).map(r => r.special)
+    .concat((STATE.myRecipes || []).map(r => r.special || 0)));
+  // fill the first gap left by a deleted recipe rather than always taking max+1
+  let n = 1;
+  while (used.has(n)) n++;
+  return n;
 }
 const CATEGORIES = [...new Set(DATA.recipes.map(r => r.category))];
 const CAT_COLOR = {
@@ -1781,9 +1875,10 @@ function phaseCoverage(r) {
 /* =============================== LIST =============================== */
 let rFilter = 'all', rQuery = '';
 const rScreen = document.getElementById('screen-recipes');
+const sesScreen = document.getElementById('screen-session');
 
-function renderRecipes() {
-  const list = allRecipes().filter(r => {
+function filteredRecipes() {
+  return allRecipes().filter(r => {
     if (rFilter === 'tested' && !r.tested && !ratingsOf(RKEY(r)).length) return false;
     if (rFilter === 'todo' && (r.tested || ratingsOf(RKEY(r)).length)) return false;
     if (rFilter === 'mine' && !r.mine && r.source !== 'mine') return false;
@@ -1793,16 +1888,15 @@ function renderRecipes() {
         !recipeItems(r).some(i => i.f.name.toLowerCase().includes(q))) return false;
     return true;
   });
+}
 
+function renderRecipes() {
   const counts = {
     all: allRecipes().length,
     tested: allRecipes().filter(r => r.tested || ratingsOf(RKEY(r)).length).length,
     todo: allRecipes().filter(r => !r.tested && !ratingsOf(RKEY(r)).length).length,
     mine: allRecipes().filter(r => r.mine || r.source === 'mine').length,
   };
-
-  const cats = [...new Set(list.map(r => r.category || 'من تصميمي'))];
-  cats.sort((a, b) => CATEGORIES.indexOf(a) - CATEGORIES.indexOf(b));
 
   rScreen.innerHTML = `
     <div class="search" style="margin-bottom:10px">
@@ -1813,6 +1907,23 @@ function renderRecipes() {
       ${[['all','الكل'],['tested','مجرّبة'],['todo','تستحق التجربة'],['mine','من تصميمي']]
         .map(([k,ar]) => `<button class="chip${rFilter===k?' on':''}" data-rf="${k}">${ar} <span class="n">${counts[k]}</span></button>`).join('')}
     </div>
+    <div id="rBody"></div>`;
+
+  document.getElementById('rq').oninput = e => { rQuery = e.target.value; renderRecipeList(); };
+  rScreen.querySelectorAll('[data-rf]').forEach(b => b.onclick = () => { rFilter = b.dataset.rf; renderRecipes(); });
+  renderRecipeList();
+}
+
+/* The list lives in its own container: typing re-renders only #rBody, so the
+   search input is never replaced and the keyboard stays up. */
+function renderRecipeList() {
+  const body = document.getElementById('rBody'); if (!body) return;
+  const list = filteredRecipes();
+  const counts = { todo: allRecipes().filter(r => !r.tested && !ratingsOf(RKEY(r)).length).length };
+  const cats = [...new Set(list.map(r => r.category || 'من تصميمي'))];
+  cats.sort((a, b) => CATEGORIES.indexOf(a) - CATEGORIES.indexOf(b));
+
+  body.innerHTML = `
     ${rFilter === 'todo' && !rQuery.trim() ? (() => {
       const recs = recommendations(5);
       return recs.length ? `<div class="fam-head"><span class="bar" style="background:var(--ember)"></span>
@@ -1831,9 +1942,7 @@ function renderRecipes() {
         + g.map(rCard).join('');
     }).join('') : '<div class="empty">لا نتيجة مطابقة.</div>'}`;
 
-  document.getElementById('rq').oninput = e => { rQuery = e.target.value; renderRecipes(); };
-  rScreen.querySelectorAll('[data-rf]').forEach(b => b.onclick = () => { rFilter = b.dataset.rf; renderRecipes(); });
-  rScreen.querySelectorAll('[data-ropen]').forEach(b => b.onclick = () => { clearSheetStack(); openRecipe(b.dataset.ropen); });
+  body.querySelectorAll('[data-ropen]').forEach(b => b.onclick = () => { clearSheetStack(); openRecipe(b.dataset.ropen); });
 }
 
 const rNum = r => r.special ? `خاص ${r.special}` : (r.no ? `#${r.no}` : '—');
@@ -1859,7 +1968,10 @@ function rCard(r) {
         <bdi>${r.name}</bdi>
         ${editOf(RKEY(r)) ? '<span class="tagv">معدّلة</span>' : ''}
         ${r.mine || r.source === 'mine' ? '<span class="tagm">تصميمي</span>' : ''}
-        ${TWINS[RKEY(r)] ? '<span class="tagdup">شبيهة</span>' : ''}
+        ${TWINS[RKEY(r)] ? (() => {
+          const tw = allRecipes().find(y => RKEY(y) === TWINS[RKEY(r)][0].k);
+          return `<span class="tagdup">شبيهة ${tw ? rNum(tw) : ''}</span>`;
+        })() : ''}
         ${avg !== null ? `<span class="tagt v-${verdictOf(k).cls}">★ ${avg.toFixed(1)} · ${verdictOf(k).t}</span>`
           : r.tested ? '<span class="tagt v-mid">مجرّبة</span>' : ''}
       </span>
@@ -1870,6 +1982,17 @@ function rCard(r) {
 }
 
 /* ============================== DETAIL ============================== */
+function fallbackCopy(text, done) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;top:-1000px;opacity:0';
+  document.body.appendChild(ta);
+  ta.select(); ta.setSelectionRange(0, text.length);
+  try { document.execCommand('copy'); done(); }
+  catch { toast('تعذّر النسخ تلقائياً', 'warn'); }
+  ta.remove();
+}
+
 function openRecipe(key) {
   clearSheetStack();
   const r = allRecipes().find(x => RKEY(x) === key); if (!r) return;
@@ -1934,6 +2057,23 @@ function openRecipe(key) {
    </div>
 
    ${rs.length ? `<div class="grp"><h4>سجل تقييماتك</h4>
+     ${rs.length > 1 ? (() => {
+       const w = 100, h = 26, n = rs.length;
+       const x = i => (n === 1 ? w / 2 : (i / (n - 1)) * w);
+       const y = v => h - ((v - 1) / 4) * (h - 4) - 2;
+       const pts = rs.map((r, i) => `${x(i).toFixed(1)},${y(r.stars).toFixed(1)}`).join(' ');
+       const first = rs[0].stars, lastS = rs[rs.length - 1].stars, d = lastS - first;
+       const col = d > 0 ? 'var(--ok)' : d < 0 ? 'var(--danger)' : 'var(--ink-soft)';
+       return `<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+         <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="flex:1;height:${h}px;overflow:visible">
+           <polyline points="${pts}" fill="none" stroke="${col}" stroke-width="1.6"
+             stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
+           ${rs.map((r, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(r.stars).toFixed(1)}" r="2" fill="${col}"/>`).join('')}
+         </svg>
+         <span style="font-size:11px;font-weight:700;color:${col};white-space:nowrap">
+           ${d > 0 ? `▲ تحسّنت +${d}` : d < 0 ? `▼ تراجعت ${d}` : '= مستقرة'}</span>
+       </div>`;
+     })() : ''}
      <div class="ses-pills" id="sesPills">
        <div class="ses-pill-ind" id="sesPillInd"></div>
        ${rs.map((x, i) => `<button class="ses-pill ${i === selRating ? 'on' : ''}" data-sestab="${i}">جلسة ${i + 1}</button>`).join('')}
@@ -1949,6 +2089,9 @@ function openRecipe(key) {
    <div style="display:flex;gap:10px;margin-top:18px">
      <button class="btn ghost" id="rcRate">${rs.length ? 'أعد التقييم' : 'قيّمها'}</button>
      <button class="btn solid" id="rcStart">ابدأ الجلسة</button>
+   </div>
+   <div style="display:flex;gap:10px;margin-top:10px">
+     <button class="btn ghost" id="rcCopy" style="flex:1">انسخ الوصفة كنص</button>
    </div>
    <div style="display:flex;gap:10px;margin-top:10px">
      <button class="btn ghost" id="rcEdit" style="flex:1">${ed ? 'عدّلها مرة أخرى' : 'عدّل الوصفة'}</button>
@@ -1997,6 +2140,21 @@ function openRecipe(key) {
     document.getElementById('rcRate').onclick = () => { pushSheetView(() => openRecipe(key)); openRate(key, null); };
     document.getElementById('rcStart').onclick = () => startSession(key);
     document.getElementById('rcEdit').onclick = () => { pushSheetView(() => openRecipe(key)); openEditRecipe(key); };
+    document.getElementById('rcCopy').onclick = () => {
+      const txt = [
+        `${r.name} — ${rNum(r)}`,
+        `${r.category || 'من تصميمي'} · بول ${STATE.settings.bowlG}غ`,
+        '',
+        ...items.map(i => `${i.pct}% · ${gramsFor(i.pct)}غ — ${i.f.name}`),
+        '',
+        r.setup ? `الإعداد: ${r.setup}` : '',
+        avg !== null ? `تقييمي: ${avg.toFixed(1)}/5 على ${rs.length} ${rs.length === 1 ? 'جلسة' : 'جلسات'}` : '',
+      ].filter(Boolean).join('\n');
+      const done = () => toast('نُسخت الوصفة', 'ok');
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(txt).then(done).catch(() => fallbackCopy(txt, done));
+      } else fallbackCopy(txt, done);
+    };
     const fixBtn = document.getElementById('rcFix');
     if (fixBtn) fixBtn.onclick = () => { pushSheetView(() => openRecipe(key)); openEditRecipe(key); };
     const delBtn = document.getElementById('rcDel');
@@ -2028,8 +2186,10 @@ function startSession(key) {
   save(true);
   closeSheet();
   keepAwake(true);
-  goTo('recipes');
   renderSession();
+  renderTabs();
+  goTo('session');
+  renderHome();
   toast('بدأت الجلسة — الشاشة ستبقى مضاءة', 'ok');
 }
 
@@ -2059,12 +2219,17 @@ function endSession(rate) {
   STATE.session = null;
   save(true);
   celebrate();
-  if (rate) { clearSheetStack(); openRate(key, s); } else { renderSession(); renderRecipes(); }
+  renderSession();
+  renderRecipes();
+  renderHome();
+  if (document.querySelector('.screen.active') === sesScreen) goTo('recipes');
+  renderTabs();
+  if (rate) { clearSheetStack(); openRate(key, s); }
 }
 
 function renderSession() {
   const s = STATE.session;
-  if (!s) { renderRecipes(); return; }
+  if (!s) { sesScreen.innerHTML = ''; return; }
   const r = allRecipes().find(x => RKEY(x) === s.key);
   const m = mins(), ph = curPhase(), items = r ? recipeItems(r) : [];
   const nextStep = COAL_STEPS.find(c => c.at > m);
@@ -2074,7 +2239,7 @@ function renderSession() {
   const ROT_TARGET = 6;
   const rotPct = Math.min(100, Math.round(s.rotations.length / ROT_TARGET * 100));
 
-  rScreen.innerHTML = `
+  sesScreen.innerHTML = `
     <div class="rot-progress${rotDue ? ' due' : ''}" title="دورة ${s.rotations.length} من ${ROT_TARGET} — نموذجية لجلسة ٩٠ دقيقة"><span style="width:${rotPct}%"></span></div>
     <div class="src" style="margin:-8px 0 14px"><span>دورة <b class="num">${s.rotations.length}</b> من ${ROT_TARGET} نموذجية${rotDue ? ' · <b style="color:var(--danger)">حان وقت التدوير</b>' : ''}</span></div>
     <div class="ses-head">
@@ -2144,7 +2309,7 @@ function renderSession() {
   };
   document.getElementById('sCoalUp').onclick = () => coalSet(+0.5);
   document.getElementById('sCoalDn').onclick = () => coalSet(-0.5);
-  rScreen.querySelectorAll('[data-mark]').forEach(b => b.onclick = () => {
+  sesScreen.querySelectorAll('[data-mark]').forEach(b => b.onclick = () => {
     s.marks.push({ k: b.dataset.mark, m: mins(), phase: curPhase().name, ts: Date.now() });
     save(); renderSession();
   });
@@ -2346,8 +2511,6 @@ function openEditRecipe(key) {
       const reason = (document.getElementById('vReason').value || '').trim();
       if (!reason) { toast('اكتب سبب التعديل.', 'warn'); return; }
       STATE.edits = STATE.edits || {};
-  (STATE.userFlavors || []).forEach(f => { if (!DATA.flavors.some(x => x.id === f.id)) DATA.flavors.push(f); });
-  renderChips();
       STATE.edits[key] = { ts: Date.now(), reason, items: items.map(i => ({ id: i.f.id, pct: i.pct })) };
       save(true);
       openRecipe(key); renderRecipes(); renderHome();
@@ -2460,6 +2623,7 @@ function renderHome() {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
         ${daysSinceBackup() === Infinity ? 'لم تأخذ نسخة احتياطية بعد' : `مضى ${daysSinceBackup()} يوماً على آخر نسخة`}</div>
       <div class="card-sub">صدّر ملفاً الآن — يحميك من فقدان تجاربك</div>
+      <button class="btn solid" id="hBackupNow" style="width:100%;margin-top:10px;padding:9px 0;font-size:13px">صدّر النسخة الآن</button>
     </div>` : ''}
 
     ${STATE.session ? `<div class="card" id="hResume" style="border-color:var(--ember);cursor:pointer">
@@ -2514,9 +2678,11 @@ function renderHome() {
   hScreen.querySelectorAll('[data-hgo]').forEach(b => b.onclick = () => goTo(b.dataset.hgo));
   hScreen.querySelectorAll('[data-hopen]').forEach(b => b.onclick = () => { goTo('recipes'); clearSheetStack(); openRecipe(b.dataset.hopen); });
   const rs = document.getElementById('hResume');
-  if (rs) rs.onclick = () => { goTo('recipes'); renderSession(); };
+  if (rs) rs.onclick = () => { renderSession(); goTo('session'); };
   const bn = document.getElementById('hBackupNudge');
   if (bn) bn.onclick = () => { clearSheetStack(); openSettings(); };
+  const bnow = document.getElementById('hBackupNow');
+  if (bnow) bnow.onclick = e => { e.stopPropagation(); exportBackup(); renderHome(); toast('نُزّلت النسخة الاحتياطية', 'ok'); };
   tickHomeSessionCard();
   countUp(hScreen);
 }
@@ -2805,9 +2971,16 @@ function openRatingEdit(key, idx) {
     });
     document.getElementById('rDel').onclick = () => { pushSheetView(() => openRatingEdit(key, idx)); confirmSheet('حذف التقييم',
       `جلسة ${idx + 1} (${x.stars} ★) ستُحذف من سجل هذه الوصفة.`, 'احذف', () => {
+        const gone = STATE.ratings[key][idx];
         STATE.ratings[key].splice(idx, 1);
         if (!STATE.ratings[key].length) delete STATE.ratings[key];
-        save(true); openRecipe(key); renderLog(); renderHome(); toast('حُذف التقييم');
+        // the paired session row is what makes the recipe still read as "مجرّبة",
+        // so it goes with the rating it was created alongside
+        if (gone) {
+          const si = (STATE.sessions || []).findIndex(s => s.key === key && Math.abs((s.end || s.start) - gone.ts) < 6e4);
+          if (si > -1) STATE.sessions.splice(si, 1);
+        }
+        save(true); openRecipe(key); renderLog(); renderHome(); renderRecipes(); toast('حُذفت الجلسة وتقييمها');
       }); };
     document.getElementById('rOk').onclick = () => {
       const d = document.getElementById('rDate').value;
@@ -2933,6 +3106,9 @@ function openTin(id) {
     document.getElementById('tinOk').onclick = () => {
       i.packG = pack;
       i.remG = Math.max(0, Math.min(pack, +document.getElementById('tinRem').value || 0));
+      // consumed is derived from what is actually left, so a manual correction
+      // keeps the two numbers consistent instead of drifting apart
+      i.usedG = Math.max(0, pack - i.remG);
       save(true); openSheet(id); renderList(); renderLog(); toast('حُدّث المخزون', 'ok');
     };
   };
@@ -3016,6 +3192,7 @@ function openAddFlavor() {
             idealPct: 30, idealG: 6, minPct: 25, maxPct: 40, hardCap: null,
             official: '', officialConf: '', note: '', userAdded: true,
           };
+      applyBridgeRole(nf);
       DATA.flavors.push(nf);
       STATE.userFlavors = (STATE.userFlavors || []).concat([nf]);
       STATE.inventory[id] = { packG: pack, remG: pack, usedG: 0, uses: 0, firstUsed: null, lastUsed: null, purchases: [] };
@@ -3117,8 +3294,10 @@ bootStorage().then(()=>{
   renderList();
   STATE.edits = STATE.edits || {};
   (STATE.userFlavors || []).forEach(f => { if (!DATA.flavors.some(x => x.id === f.id)) DATA.flavors.push(f); });
+  applyBridgeRolesToLibrary();
   renderChips();
-  STATE.session ? renderSession() : renderRecipes();
+  renderRecipes();
+  if (STATE.session) { renderSession(); renderTabs(); }
   renderHome();
   renderLog();
   updateBackupBadge();
