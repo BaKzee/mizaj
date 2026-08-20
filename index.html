@@ -235,6 +235,14 @@ bdi{unicode-bidi:isolate}
 .still-bar button{border:none;border-radius:9px;padding:7px 11px;font-family:inherit;
   font-size:12px;font-weight:700;cursor:pointer;background:var(--fill);color:var(--ink)}
 .still-bar button#sesYes{background:var(--ember);color:#fff}
+.cmp-head{display:flex;justify-content:space-between;font-size:11px;font-weight:700;
+  color:var(--ink-soft);padding-bottom:8px;border-bottom:1px solid var(--line);margin-bottom:6px;gap:10px}
+.cmp-head span{flex:1;text-align:center}
+.cmp-row{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--line)}
+.cmp-row.diff{background:color-mix(in srgb,var(--ember) 7%,transparent);border-radius:8px;padding-inline:8px}
+.cmp-a,.cmp-b{flex:0 0 52px;text-align:center;font-size:12.5px;font-weight:700}
+.cmp-row.diff .cmp-a{color:var(--ink-soft)} .cmp-row.diff .cmp-b{color:var(--ember)}
+.cmp-n{flex:1;font-size:12px;display:flex;align-items:center;gap:6px;justify-content:center}
 .bowl-pick{margin-top:9px;padding:10px 12px;border-radius:11px;background:var(--fill);
   border-inline-start:3px solid var(--ember)}
 .bowl-pick b{display:block;font-size:13px;color:var(--ember);margin-bottom:3px}
@@ -815,11 +823,14 @@ function openSheet(id){
      ${wasteOf[f.name]?`<div class="alert dup"><b>هدر — لا تفسد الطعم لكنها بلا فائدة (${wasteOf[f.name].length})</b><ul>${wasteOf[f.name].map(b=>`<li><bdi>${b.n}</bdi> — ${b.r}</li>`).join('')}</ul></div>`:''}
    </div>`:''}
    <div style="display:flex;gap:10px;margin-top:18px">
+     <button class="btn ghost" id="fvWhere">أين تُستخدم؟ (${recipesUsing(f.id).length})</button>
      <button class="btn ghost" id="fvText">عدّل النصوص</button>
      <button class="btn solid" id="fvTin">المخزون · ${invPct(f.id)}%</button>
      ${f.userAdded ? '<button class="btn ghost" id="fvDel" style="flex-basis:100%;margin-top:10px;color:var(--danger)">احذف هذه النكهة</button>' : ''}
    </div>`;
   setTimeout(()=>{
+    const where=document.getElementById('fvWhere');
+    if(where) where.onclick=()=>{ pushSheetView(()=>openSheet(f.id)); openWhereUsed(f.id); };
     const a=document.getElementById('fvText'), b=document.getElementById('fvTin');
     const del=document.getElementById('fvDel');
     if(del) del.onclick=()=>{
@@ -1048,7 +1059,7 @@ function freshState() {
     // overfill = extra % of tobacco needed to actually fill it to the rim.
     //            12% of a 20g bowl is 2.4g — matching what BaKzee measures.
     settings: { bowlG: 20, overfillPct: 12, lowPct: 15, defaultPackG: 200,
-                sessionCapMin: 90 },
+                sessionCapMin: 90, sound: true },
     inventory: inv,
     draft: null,
     sessions: [],
@@ -1139,6 +1150,40 @@ function gramsFor(pct) { return +(bowlTotal() * pct / 100).toFixed(1); }
 function invOf(id) { return STATE.inventory[id]; }
 function invPct(id) { const i = invOf(id); return i ? Math.round(i.remG / i.packG * 100) : 0; }
 function isLow(id) { return invPct(id) <= STATE.settings.lowPct; }
+
+/* ─── قاعدة مشتركة: التوفّر، التكلفة، والإهمال ─── */
+const NEGLECT_DAYS = 120;
+
+// الوصفات التي تستعمل نكهة بعينها — الرابط العكسي الذي كان مفقوداً
+function recipesUsing(fid) {
+  return allRecipes().filter(r => liveItems(r).some(i => i.f.id === fid));
+}
+
+// هل يكفي المخزون فعلاً لتنفيذ الوصفة كاملة في بول واحد؟
+function canMakeNow(r) {
+  const missing = [];
+  liveItems(r).forEach(i => {
+    const need = gramsFor(i.pct), inv = invOf(i.f.id);
+    if (!inv || inv.remG < need) missing.push({ f: i.f, need, have: inv ? inv.remG : 0 });
+  });
+  return { ok: !missing.length, missing };
+}
+
+// تكلفة الجلسة = مجموع (غرامات كل نكهة × سعر الغرام). تُحسب فقط لما تُدخل الأسعار.
+const gramCost = id => { const i = invOf(id); return (i && i.price && i.packG) ? i.price / i.packG : null; };
+function recipeCost(r) {
+  let total = 0, known = 0, all = liveItems(r).length;
+  liveItems(r).forEach(i => { const c = gramCost(i.f.id);
+    if (c !== null) { total += c * gramsFor(i.pct); known++; } });
+  return { total, known, all, complete: known === all && all > 0 };
+}
+
+// نكهة لم تُلمس منذ أربعة أشهر — أو لم تُفتح أصلاً
+function isNeglected(fid) {
+  const i = invOf(fid); if (!i) return false;
+  if (!i.lastUsed) return true;
+  return (Date.now() - i.lastUsed) / 864e5 >= NEGLECT_DAYS;
+}
 
 function consume(items) {           // [{flavorId, grams}]
   items.forEach(({ flavorId, grams }) => {
@@ -2296,6 +2341,17 @@ function openRecipe(key) {
         <span class="pct num">${i.pct}% · ${gramsFor(i.pct)}غ</span></div>`).join('')}
    </div>
 
+   ${(() => { const c = recipeCost(r), cm = canMakeNow(r);
+     if (!c.known && cm.ok) return '';
+     return `<div class="grp"><h4>التوفّر والتكلفة</h4>
+       <div class="tier ${cm.ok ? '' : 'o'}" style="${cm.ok ? 'color:var(--ok)' : ''}"><span class="sw"></span><span class="t">
+       ${cm.ok ? 'كل مكوّناتها متوفّرة بالكمية الكافية.'
+         : `ينقصك: ${cm.missing.map(m => `<bdi>${m.f.name}</bdi> (${m.need}غ ولديك ${Math.round(m.have)}غ)`).join('، ')}`}
+       </span></div>
+       ${c.known ? `<div class="tier" style="margin-top:6px"><span class="sw"></span><span class="t">
+         تكلفة البول: <b class="num">${c.total.toFixed(1)}</b>${c.complete ? '' : ` (من ${c.known} من ${c.all} نكهات مسعّرة فقط)`}
+       </span></div>` : ''}</div>`; })()}
+
    ${r.setup ? `<div class="grp"><h4>الإعداد</h4><div class="note">${r.setup}</div>
      ${r.bowl ? (() => { const rec = bowlTypeOf(r.bowl);
        return `<div class="bowl-pick"><b>${rec.name}</b><span>${rec.note}</span></div>`;
@@ -2351,6 +2407,7 @@ function openRecipe(key) {
      <button class="btn solid" id="rcStart">ابدأ الجلسة</button>
    </div>
    <div style="display:flex;gap:10px;margin-top:10px">
+     <button class="btn ghost" id="rcCmp" style="flex:1">قارنها</button>
      <button class="btn ghost" id="rcCopy" style="flex:1">انسخ الوصفة</button>
      <button class="btn ghost" id="rcHide" style="flex:0 0 42%">${isHidden(key) ? 'أظهرها' : 'أخفِها'}</button>
    </div>
@@ -2407,6 +2464,7 @@ function openRecipe(key) {
       draw();
       sheet.scrollTop = scrollY;
     });
+    document.getElementById('rcCmp').onclick = () => { pushSheetView(() => openRecipe(key)); openCompare(key); };
     document.getElementById('rcHide').onclick = () => {
       toggleHidden(key);
       renderRecipes();
@@ -2477,6 +2535,7 @@ function startSession(key) {
   save(true);
   closeSheet();
   keepAwake(true);
+  primeAudio();
   renderSession();
   renderTabs();
   goTo('session');
@@ -2509,6 +2568,39 @@ function lastActivityTs(s) {
     ...(s.coals || []).map(c => c.ts),
     ...(s.marks || []).map(x => x.ts)].filter(Boolean);
   return Math.max(...ts);
+}
+
+/* نغمة قصيرة مولّدة برمجياً — لا ملف صوت خارجي يعطّل العمل بلا إنترنت.
+   iOS يمنع الصوت قبل أول لمسة، لذا نهيّئ السياق عند بدء الجلسة. */
+let audioCtx = null;
+function primeAudio() {
+  if (audioCtx || !STATE.settings.sound) return;
+  try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch { audioCtx = null; }
+}
+function beep(times = 2) {
+  if (!STATE.settings.sound || !audioCtx) return;
+  if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+  for (let n = 0; n < times; n++) {
+    const t0 = audioCtx.currentTime + n * 0.42;
+    const osc = audioCtx.createOscillator(), g = audioCtx.createGain();
+    osc.type = 'sine'; osc.frequency.setValueAtTime(660, t0);
+    g.gain.setValueAtTime(0, t0);
+    g.gain.linearRampToValueAtTime(0.22, t0 + 0.03);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.34);
+    osc.connect(g); g.connect(audioCtx.destination);
+    osc.start(t0); osc.stop(t0 + 0.36);
+  }
+  if (navigator.vibrate) { try { navigator.vibrate([180, 90, 180]); } catch {} }
+}
+
+/* ينطلق مرة واحدة لكل دورة، لا كل ثانية بينما التدوير مستحق */
+function checkRotationAlert() {
+  const s = STATE.session; if (!s) return;
+  const lastRot = s.rotations.length ? s.rotations[s.rotations.length - 1] : s.start;
+  const due = (Date.now() - lastRot) / 60000 >= rotateEvery();
+  const cycle = s.rotations.length;
+  if (due && s.alertedCycle !== cycle) { s.alertedCycle = cycle; beep(2); }
+  if (!due && s.alertedCycle !== undefined && s.alertedCycle !== cycle) s.alertedCycle = undefined;
 }
 
 function checkForgottenSession() {
@@ -2605,6 +2697,13 @@ function renderSession() {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M20.5 12a8.5 8.5 0 1 1-3-6.5"/><path d="M21 3v5h-5"/></svg>
         <span>دوّر الفحم</span><b class="num">${s.rotations.length}</b>
       </button>
+      <button class="sbtn" id="sSound" style="flex:0 0 auto;padding:14px 12px">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color:${STATE.settings.sound ? 'var(--ember)' : 'var(--ink-soft)'}">
+          <path d="M11 5 6 9H3v6h3l5 4z"/>${STATE.settings.sound
+            ? '<path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/>'
+            : '<path d="M17 9l4 6M21 9l-4 6"/>'}</svg>
+        <span style="font-size:10.5px">${STATE.settings.sound ? 'المنبّه يعمل' : 'المنبّه مطفأ'}</span>
+      </button>
       <div class="sbtn coalbox">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 3c3 3 5 6 5 9a5 5 0 0 1-10 0c0-1.5.5-2.5 1.5-4 .3 1 1 1.5 1.5 1 .5-3 .5-4.5 2-6z"/></svg>
         <span>الفحم الآن</span>
@@ -2650,6 +2749,11 @@ function renderSession() {
     save(); renderSession();
     if (s.coalCount >= 3.5) toast('اقتربت من السقف — راقب الحدّة', 'warn');
   };
+  document.getElementById('sSound').onclick = () => {
+    STATE.settings.sound = !STATE.settings.sound; save(true);
+    if (STATE.settings.sound) { primeAudio(); beep(1); }
+    renderSession();
+  };
   document.getElementById('sCoalUp').onclick = () => coalSet(+0.5);
   document.getElementById('sCoalDn').onclick = () => coalSet(-0.5);
   sesScreen.querySelectorAll('[data-mark]').forEach(b => b.onclick = () => {
@@ -2664,7 +2768,7 @@ function renderSession() {
 
   if (!sesTimer) sesTimer = setInterval(() => {
     if (!STATE.session) return;
-    renderSession(); tickHomeSessionCard(); checkForgottenSession();
+    renderSession(); tickHomeSessionCard(); checkRotationAlert(); checkForgottenSession();
   }, 1000);
 }
 
@@ -2915,8 +3019,9 @@ function tasteProfile() {
 }
 
 function tasteHTML() {
+  const genBanner = `<button class="btn ghost" id="lGen" style="width:100%;margin-bottom:12px;padding:10px 0;font-size:13px">ولّد وصفة من ذوقي</button>`;
   const t = tasteProfile();
-  if (!t) return '<div class="empty">لا تقييمات بعد.<br>قيّم بضع جلسات وسيبني التطبيق ملف ذوقك من نفسه.</div>';
+  if (!t) return genBanner + '<div class="empty">لا تقييمات بعد.<br>قيّم بضع جلسات وسيبني التطبيق ملف ذوقك من نفسه.</div>';
   const loved = t.flavors.filter(x => x.s >= 4).slice(0, 6);
   const weak = t.flavors.filter(x => x.s <= 3).slice(-6).reverse();
   const bar = s => `<span class="dots" style="--ax:var(--ember)">${
@@ -2926,7 +3031,7 @@ function tasteHTML() {
         <span style="color:var(--ink-soft);font-size:10px"> · ${x.n === 1 ? 'وصفة واحدة' : x.n + ' وصفات'}</span></span>
       ${bar(x.s)}<span class="val num">${x.s.toFixed(1)}</span></div>`;
   const chipRows = Object.entries(t.chips).sort((a,b)=>b[1]-a[1]);
-  return `
+  return genBanner + `
     <div class="grp"><h4>مبني على ${t.rated} وصفة قيّمتها</h4>
       <div class="note">هذا ما استنتجه التطبيق من نجومك وحدها. انتبه لعدد الوصفات خلف كل رقم:
         نكهة ظهرت في وصفة واحدة قد يكون رقمها صدفة، لا حكماً على النكهة.</div></div>
@@ -3053,6 +3158,8 @@ function renderHome() {
   const lastRate = last ? ratingsOf(last.key).slice(-1)[0] : null;
   const pick = recommendations(1)[0] || null;
   const lows = DATA.flavors.filter(f => isLow(f.id));
+  const gone = DATA.flavors.filter(f => isEmpty(f.id));
+  const nearOut = lows.filter(f => !isEmpty(f.id));
   const opened = DATA.flavors.filter(f => invOf(f.id) && invOf(f.id).lastUsed).length;
 
   hScreen.innerHTML = `
@@ -3078,6 +3185,25 @@ function renderHome() {
         </div>
       </div>
     </div>` : ''}
+
+    ${(() => {
+      const idle = DATA.flavors.filter(f => isNeglected(f.id) && !isEmpty(f.id));
+      if (idle.length < 3) return '';
+      const idleIds = new Set(idle.map(f => f.id));
+      // الوصفة الأفضل هنا هي التي تُحيي أكبر عدد من المهمَل وأنت قادر على تنفيذها فعلاً
+      const best = allRecipes()
+        .filter(r => !isHidden(RKEY(r)) && canMakeNow(r).ok)
+        .map(r => ({ r, n: liveItems(r).filter(i => idleIds.has(i.f.id)).length }))
+        .filter(x => x.n >= 2).sort((a, b) => b.n - a.n)[0];
+      if (!best) return '';
+      return `<div class="section-label" style="margin-top:${STATE.session ? '4px' : '0'}">نكهات نسيتها</div>
+      <div class="card" data-hopen="${RKEY(best.r)}" style="cursor:pointer">
+        <div class="card-eyebrow">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+          ${idle.length} نكهة لم تلمسها منذ ${NEGLECT_DAYS} يوماً</div>
+        <div class="card-title"><bdi>${best.r.name}</bdi></div>
+        <div class="card-sub">تُحيي ${best.n} منها — ${liveItems(best.r).filter(i => idleIds.has(i.f.id)).map(i => `<bdi>${i.f.name}</bdi>`).join('، ')}</div>
+      </div>`; })()}
 
     ${pick ? `<div class="section-label" style="margin-top:${STATE.session ? '4px' : '0'}">تستحق التجربة</div>
     <div class="card" data-hopen="${RKEY(pick.r)}" style="cursor:pointer">
@@ -3108,10 +3234,12 @@ function renderHome() {
         <div class="card-title" style="font-size:14px">الوصفات</div>
         <div class="card-sub"><b data-count="${allRecipes().length}">${allRecipes().length}</b> · <b data-count="${sessions.length}">${sessions.length}</b> جلسة مسجّلة</div>
       </div>
-      <div class="card" data-hgo="library">
+      <div class="card" id="hStock" style="cursor:pointer">
         <div class="mini-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M20.5 12a8.5 8.5 0 1 1-3-6.5"/><path d="M21 3v5h-5"/></svg></div>
         <div class="card-title" style="font-size:14px">المخزون</div>
-        <div class="card-sub"><b data-count="${opened}">${opened}</b> مفتوحة${lows.length ? ` · <span style="color:var(--warn)">${lows.length} تقارب النفاد</span>` : ''}</div>
+        <div class="card-sub"><b data-count="${opened}">${opened}</b> مفتوحة${
+          gone.length ? ` · <span id="hStockGone" style="color:var(--danger)">${gone.length} نفدت</span>` : ''}${
+          nearOut.length ? ` · <span id="hStockLow" style="color:var(--warn)">${nearOut.length} تقارب النفاد</span>` : ''}</div>
       </div>
     </div>`;
 
@@ -3119,6 +3247,13 @@ function renderHome() {
   hScreen.querySelectorAll('[data-hopen]').forEach(b => b.onclick = () => { goTo('recipes'); clearSheetStack(); openRecipe(b.dataset.hopen); });
   const rs = document.getElementById('hResume');
   if (rs) rs.onclick = () => { renderSession(); goTo('session'); };
+  const hs = document.getElementById('hStock');
+  if (hs) hs.onclick = e => {
+    // الضغط على تنبيه النفاد يفتح المخزون مُرشَّحاً على الناقص مباشرة
+    stockFilter = e.target.closest('#hStockGone') ? 'gone'
+                : e.target.closest('#hStockLow')  ? 'low' : 'all';
+    stockQuery = ''; lView = 'stock'; goTo('log'); renderLog();
+  };
   const bn = document.getElementById('hBackupNudge');
   if (bn) bn.onclick = () => { clearSheetStack(); openSettings(); };
   const bnow = document.getElementById('hBackupNow');
@@ -3232,6 +3367,21 @@ function renderLog() {
     lView === 'log' ? logHTML() : lView === 'buy' ? buyHTML() :
     lView === 'taste' ? tasteHTML() : stockHTML();
   if (lView === 'stock') wireStockRows();
+
+  const shopBtn = document.getElementById('lShop');
+  if (shopBtn) shopBtn.onclick = () => { clearSheetStack(); openShopping(); };
+
+  const genBtn = document.getElementById('lGen');
+  if (genBtn) genBtn.onclick = () => {
+    const items = generateFromTaste();
+    if (!items) { toast('لا يكفي المتوفّر لتوليد وصفة.', 'warn'); return; }
+    BUILD.picks = items; save(); goTo('build'); renderBuild();
+    toast('وُلّدت من المتوفّر لديك — عدّلها كما تشاء', 'ok');
+  };
+
+  // نفس زر المكتبة — الإضافة تخصّ المخزون بقدر ما تخصّ المكتبة، والاثنان يبقيان
+  const addBtn = document.getElementById('lAddFlav');
+  if (addBtn) addBtn.onclick = () => { clearSheetStack(); openAddFlavor(); };
   countUp(document.getElementById('lBody'));
   document.getElementById('lBody').querySelectorAll('[data-lopen]')
     .forEach(b => b.onclick = () => { goTo('recipes'); clearSheetStack(); openRecipe(b.dataset.lopen); });
@@ -3291,20 +3441,33 @@ function logHTML() {
 }
 
 /* ------------------------------- BUY ------------------------------- */
-let stockQuery = '';
+let stockQuery = '', stockFilter = 'all';
+const isEmpty = id => invPct(id) <= 0;
 function stockHTML() {
-  const lowCount = DATA.flavors.filter(f => isLow(f.id)).length;
+  const low = DATA.flavors.filter(f => isLow(f.id) && !isEmpty(f.id)).length;
+  const gone = DATA.flavors.filter(f => isEmpty(f.id)).length;
+  const chip = (k, ar, cnt, col) => `<button class="chip${stockFilter===k?' on':''}" data-sf="${k}">${ar}${
+    cnt !== null ? ` <span class="n"${col?` style="color:${col}"`:''}>${cnt}</span>` : ''}</button>`;
   return `
+    <button class="btn ghost" id="lAddFlav" style="width:100%;margin-bottom:12px;padding:10px 0;font-size:13px">+ نكهة أو علبة جديدة</button>
     <div class="search" style="margin-bottom:10px">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
       <input id="stockQ" type="search" placeholder="ابحث بالاسم أو البراند…" autocomplete="off" value="${stockQuery}">
     </div>
-    ${lowCount ? `<div class="note" style="margin-bottom:10px;color:var(--warn)">${lowCount} نكهة تقارب النفاد.</div>` : ''}
+    <div class="chips" style="margin-bottom:10px">
+      ${chip('all','الكل',DATA.flavors.length)}
+      ${chip('low','تقارب النفاد',low,'var(--warn)')}
+      ${chip('gone','نفدت',gone,'var(--danger)')}
+    </div>
     <div id="stockRows"></div>`;
 }
 function stockRowsHTML() {
   const q = stockQuery.trim().toLowerCase();
-  const list = DATA.flavors.filter(f => !q || f.name.toLowerCase().includes(q) || f.brand.toLowerCase().includes(q))
+  const list = DATA.flavors.filter(f => {
+      if (stockFilter === 'low' && !(isLow(f.id) && !isEmpty(f.id))) return false;
+      if (stockFilter === 'gone' && !isEmpty(f.id)) return false;
+      return !q || f.name.toLowerCase().includes(q) || f.brand.toLowerCase().includes(q);
+    })
     .sort((a, b) => FAM.indexOf(a.family) - FAM.indexOf(b.family) || invPct(a.id) - invPct(b.id));
   let lastFam = null;
   return list.length ? list.map(f => {
@@ -3324,19 +3487,154 @@ function renderStockRows() {
   el.innerHTML = stockRowsHTML();
   el.querySelectorAll('[data-stock]').forEach(row => row.onclick = () => {
     const id = row.dataset.stock;
-    pushSheetView(() => { lView = 'stock'; goTo('log'); renderLog(); });
+    pushSheetView(() => { lView = 'stock'; goTo('log'); renderLog(); });  // يعود بالفلتر كما تركه
     openTin(id, true);
   });
 }
 function wireStockRows() {
   document.getElementById('stockQ').oninput = e => { stockQuery = e.target.value; renderStockRows(); };
+  document.getElementById('lBody').querySelectorAll('[data-sf]').forEach(b => b.onclick = () => {
+    stockFilter = b.dataset.sf;
+    document.getElementById('lBody').innerHTML = stockHTML();
+    wireStockRows();
+  });
   renderStockRows();
 }
 
+/* ما الذي يفتحه شراء نكهة واحدة: عدد الوصفات التي تنتقل من "متعطّلة" إلى "جاهزة".
+   هذا يربط قرار الشراء بالفائدة لا بالرغبة. */
+function unlockValue(fid) {
+  const before = allRecipes().filter(r => canMakeNow(r).ok).length;
+  const inv = invOf(fid), snap = inv.remG;
+  inv.remG = inv.packG;                    // افتراض شراء علبة كاملة
+  const after = allRecipes().filter(r => canMakeNow(r).ok).length;
+  inv.remG = snap;
+  return after - before;
+}
+
+function openShopping() {
+  const cand = DATA.flavors.filter(f => isLow(f.id) || isEmpty(f.id))
+    .map(f => ({ f, unlock: unlockValue(f.id), used: recipesUsing(f.id).length }))
+    .sort((a, b) => b.unlock - a.unlock || b.used - a.used);
+  const picked = new Set();
+  const draw = () => {
+    // الأثر التراكمي: شراء ثلاث نكهات معاً قد يفتح أكثر من مجموعها منفردة
+    const snaps = [...picked].map(id => { const i = invOf(id); const s = i.remG; i.remG = i.packG; return [i, s]; });
+    const totalOpen = allRecipes().filter(r => canMakeNow(r).ok).length;
+    const cost = [...picked].reduce((s, id) => { const i = invOf(id); return s + (i.price || 0); }, 0);
+    const noPrice = [...picked].some(id => !invOf(id).price);
+    snaps.forEach(([i, s]) => { i.remG = s; });
+    const baseOpen = allRecipes().filter(r => canMakeNow(r).ok).length;
+    sBody.innerHTML = `
+      <div class="sh-title">قائمة الشراء</div>
+      <div class="sh-sub"><span>مرتّبة بما تفتحه لك من وصفات</span></div>
+      ${picked.size ? `<div class="grp"><div class="tier" style="color:var(--ok)"><span class="sw"></span><span class="t">
+        باختيارك ${picked.size} نكهة: الوصفات الجاهزة تصير <b>${totalOpen}</b> بدل ${baseOpen}
+        <b>(+${totalOpen - baseOpen})</b>.${cost ? ` التكلفة ${cost.toFixed(0)}${noPrice ? ' على الأقل — بعضها بلا سعر' : ''}.` : ''}
+      </span></div></div>` : ''}
+      ${cand.length ? `<div class="grp">${cand.map(c => `
+        <div class="flav" data-buy="${c.f.id}" style="${picked.has(c.f.id) ? 'border-color:var(--ember)' : ''}">
+          <span class="stripe" style="background:${famColor(c.f.family)}"></span>
+          <span class="main"><span class="nm"><bdi>${c.f.name}</bdi>${picked.has(c.f.id) ? '<span class="lead">مختارة</span>' : ''}</span>
+            <span class="meta">${isEmpty(c.f.id) ? '<span style="color:var(--danger)">نفدت</span>' : `باقٍ ${invPct(c.f.id)}%`}
+              · في ${c.used} وصفة${c.unlock > 0 ? ` · <span style="color:var(--ok)">تفتح ${c.unlock}</span>` : ''}</span></span>
+          <span class="pct num">${invOf(c.f.id).price ? invOf(c.f.id).price : '—'}</span>
+        </div>`).join('')}</div>`
+        : '<div class="empty">مخزونك مكتمل — لا شيء يحتاج شراء.</div>'}`;
+    sBody.querySelectorAll('[data-buy]').forEach(b => b.onclick = () => {
+      const id = b.dataset.buy; picked.has(id) ? picked.delete(id) : picked.add(id); draw();
+    });
+  };
+  draw();
+  scrim.classList.add('on'); sheet.classList.add('on'); document.body.style.overflow = 'hidden';
+}
+
+/* (6) توليد وصفة من المتوفّر فعلاً + ملف ذوقك.
+   كل نسبة تمرّ عبر windowFor نفسه الذي يحكم شاشة البناء، فلا يمكن للمولّد
+   أن يخرق قانوناً — قانون التبريد مثلاً يحدّ النعناع النقي عند 5% مهما أحببته. */
+function generateFromTaste() {
+  const t = tasteProfile(), score = {};
+  if (t) t.flavors.forEach(x => { score[x.f.id] = x.s; });
+  const avail = DATA.flavors.filter(f => invOf(f.id).remG >= gramsFor(HARD_MIN));
+  const snapshot = BUILD.picks;
+  const picks = [];
+  BUILD.picks = picks;                       // windowFor يقرأ الاختيارات الحالية
+
+  // excludeSelf ضروري: بدونه يقارن قانون الهيمنة النكهة بنفسها فيصفّر نافذتها
+  const bounds = f => { const w = windowFor(f, true);
+    return { lo: Math.max(HARD_MIN, w.lo), hi: Math.min(HARD_MAX, w.hi) }; };
+  /* القانون السادس يمنع التبريد النقي نهائياً مع الكريمية والزهرية والقهوة
+     والشوكولاتة. المولّد يفحص هذا قبل الاختيار لا بعده — كي لا ينتج خلطة
+     يرفضها محرّك التطبيق نفسه. */
+  const coolBanned = () => picks.some(p =>
+    ['creamy', 'floral'].includes(p.f.family) ||
+    ['قهوة', 'شوكولاتة وبندق', 'شوكولاتة مخبوزة'].includes(p.f.subfamily));
+  const banPair = (a, b) => DATA.bans.some(x => x.kind === 'fail' &&
+    ((x.a === a.name && x.b === b.name) || (x.a === b.name && x.b === a.name)));
+  const legal = f => {
+    if (f.roles.includes('pureCool') && coolBanned()) return false;
+    if (f.family === 'cooling' && coolBanned() && f.cool >= 4) return false;
+    return !picks.some(p => banPair(p.f, f));
+  };
+  const best = pred => avail
+    .filter(f => !picks.some(p => p.f.id === f.id) && legal(f) && pred(f))
+    .sort((a, b) => (score[b.id] || 3) - (score[a.id] || 3))[0] || null;
+  const add = (f, want) => {
+    if (!f) return;
+    picks.push({ f, pct: HARD_MIN });
+    const b = bounds(f);
+    if (b.hi < b.lo) { picks.pop(); return; }
+    picks[picks.length - 1].pct =
+      Math.min(b.hi, Math.max(b.lo, Math.round(want / STEP) * STEP));
+  };
+
+  add(best(f => f.roles.includes('main') || f.roles.includes('base')), 35);
+  if (!picks.length) { BUILD.picks = snapshot; return null; }
+  add(best(f => servesPhase(f, 2)), 25);
+  add(best(f => servesPhase(f, 0)), 15);
+  add(best(f => f.roles.includes('bridge') || f.roles.includes('support')), 15);
+
+  // موازنة إلى 100% بخطوات 5% دون تجاوز نافذة أي نكهة
+  const sum = () => picks.reduce((s, i) => s + i.pct, 0);
+  for (let guard = 0; sum() !== 100 && guard < 80; guard++) {
+    const up = sum() < 100;
+    const cand = picks
+      .filter(p => { const b = bounds(p.f); return up ? p.pct + STEP <= b.hi : p.pct - STEP >= b.lo; })
+      .sort((a, c) => up ? (score[c.f.id] || 3) - (score[a.f.id] || 3)
+                         : (score[a.f.id] || 3) - (score[c.f.id] || 3))[0];
+    if (!cand) break;
+    cand.pct += up ? STEP : -STEP;
+  }
+  /* قانون الهيمنة قد يقفل كل النوافذ قبل بلوغ المئة (كل نكهة محبوسة تحت
+     الأعلى منها). العلاج نكهة إضافية تستوعب الفارق، لا كسر القانون. */
+  for (let tries = 0; sum() < 100 && tries < 4; tries++) {
+    const need = 100 - sum();
+    const f = best(x => { const b = bounds(x); return b.lo <= need; });
+    if (!f) break;
+    picks.push({ f, pct: HARD_MIN });
+    const b = bounds(f);
+    if (b.hi < b.lo || b.lo > need) { picks.pop(); break; }
+    picks[picks.length - 1].pct = Math.min(b.hi, Math.max(b.lo, Math.floor(need / STEP) * STEP));
+    for (let guard = 0; sum() !== 100 && guard < 40; guard++) {
+      const up = sum() < 100;
+      const c = picks.filter(p => { const bb = bounds(p.f);
+        return up ? p.pct + STEP <= bb.hi : p.pct - STEP >= bb.lo; })[0];
+      if (!c) break;
+      c.pct += up ? STEP : -STEP;
+    }
+  }
+
+  const ok = sum() === 100;
+  const out = ok ? picks.map(p => ({ f: p.f, pct: p.pct })) : null;
+  BUILD.picks = snapshot;
+  return out;
+}
+
 function buyHTML() {
+  const shopBanner = `<button class="btn ghost" id="lShop" style="width:100%;margin-bottom:12px;padding:10px 0;font-size:13px">افتح قائمة الشراء الذكية</button>`;
   const inv = DATA.flavors.map(f => ({ f, i: invOf(f.id), t: turnover(f.id), left: monthsLeft(f.id) }));
   const used = inv.filter(x => x.i.usedG > 0);
-  if (!used.length) return `<div class="empty">لا استهلاك مسجّل بعد.<br>هذه اللوحة تُبنى من جلساتك الفعلية — كل جلسة تسجّلها تجعلها أدق.<br><br>سجّل 3–4 جلسات وستبدأ الأرقام بالظهور.</div>`;
+  if (!used.length) return shopBanner + `<div class="empty">لا استهلاك مسجّل بعد.<br>هذه اللوحة تُبنى من جلساتك الفعلية — كل جلسة تسجّلها تجعلها أدق.<br><br>سجّل 3–4 جلسات وستبدأ الأرقام بالظهور.</div>`;
 
   const top = used.slice().sort((a, b) => b.i.usedG - a.i.usedG).slice(0, 8);
   const soon = used.filter(x => x.left !== null && x.left <= 2).sort((a, b) => a.left - b.left);
@@ -3360,7 +3658,7 @@ function buyHTML() {
       used.filter(x => x.f.family === g.k).sort((a, b) => b.t - a.t).slice(0, 1)))
     .filter((x, i, a) => a.findIndex(y => y.f.id === x.f.id) === i).slice(0, 8);
 
-  return `
+  return shopBanner + `
     <div class="note" style="margin-bottom:14px">كل رقم هنا مقاس من ${STATE.sessions.length} ${STATE.sessions.length === 1 ? 'جلسة' : 'جلسة'} سجّلتها — لا تقدير.</div>
 
     ${buyList.length ? `<div class="section-label">قائمة الشراء الموصى بها</div>
@@ -3568,6 +3866,83 @@ function openFlavorEdit(id) {
 }
 
 /* ---------------- inventory: new tin, new flavour ---------------- */
+/* (1) أين تُستخدم هذه النكهة — مع بيان أي وصفة تتعطّل لو نفدت */
+function openWhereUsed(fid) {
+  const f = DATA.flavors.find(x => x.id === fid); if (!f) return;
+  const list = recipesUsing(fid);
+  const blocked = list.filter(r => !canMakeNow(r).ok);
+  sBody.innerHTML = `
+    <div class="sh-title">أين تُستخدم <bdi>${f.name}</bdi></div>
+    <div class="sh-sub"><span>${list.length} وصفة</span>${blocked.length ? `<span class="tagt v-bad">${blocked.length} متعطّلة الآن</span>` : ''}</div>
+    ${list.length ? `<div class="grp">${list.map(r => {
+      const share = liveItems(r).find(i => i.f.id === fid);
+      const cm = canMakeNow(r);
+      return `<div class="flav" data-wopen="${RKEY(r)}">
+        <span class="stripe" style="background:${catColor(r.category || 'من تصميمي')}"></span>
+        <span class="main"><span class="nm"><span class="rno num">${rNum(r)}</span><bdi>${r.name}</bdi></span>
+          <span class="meta">${share ? `${share.pct}% · ${gramsFor(share.pct)}غ` : ''}${
+            cm.ok ? '' : ` · <span style="color:var(--warn)">ينقصها ${cm.missing.length}</span>`}</span></span>
+      </div>`; }).join('')}</div>`
+      : '<div class="empty">لا وصفة تستخدمها بعد.</div>'}`;
+  sBody.querySelectorAll('[data-wopen]').forEach(b => b.onclick = () => openRecipe(b.dataset.wopen));
+  scrim.classList.add('on'); sheet.classList.add('on'); document.body.style.overflow = 'hidden';
+}
+
+/* (7) مقارنة وصفتين: الفرق وحده هو ما يستحق العرض */
+function openCompare(keyA) {
+  const A = allRecipes().find(x => RKEY(x) === keyA); if (!A) return;
+  let keyB = null;
+  const draw = () => {
+    const B = keyB ? allRecipes().find(x => RKEY(x) === keyB) : null;
+    const iA = liveItems(A), iB = B ? liveItems(B) : [];
+    const ids = [...new Set([...iA, ...iB].map(i => i.f.id))];
+    const pctOf = (arr, id) => (arr.find(i => i.f.id === id) || {}).pct || 0;
+    sBody.innerHTML = `
+      <div class="sh-title">قارن مع <bdi>${A.name}</bdi></div>
+      <div class="sh-sub"><span>${B ? 'الفروق فقط' : 'اختر وصفة للمقارنة'}</span></div>
+      ${!B ? `<div class="search" style="margin-bottom:10px">
+          <input id="cmpQ" type="search" placeholder="ابحث عن وصفة…" style="padding-inline-start:14px" autocomplete="off"></div>
+        <div id="cmpList"></div>`
+      : `<div class="grp"><div class="cmp-head"><span><bdi>${A.name}</bdi></span><span><bdi>${B.name}</bdi></span></div>
+        ${ids.map(id => { const a = pctOf(iA, id), b = pctOf(iB, id);
+          const f = (iA.concat(iB)).find(i => i.f.id === id).f;
+          const same = a === b;
+          return `<div class="cmp-row ${same ? '' : 'diff'}">
+            <span class="cmp-a num">${a ? a + '%' : '—'}</span>
+            <span class="cmp-n"><span class="dot" style="background:${famColor(f.family)}"></span><bdi>${f.name}</bdi></span>
+            <span class="cmp-b num">${b ? b + '%' : '—'}</span></div>`; }).join('')}
+        </div>
+        <div class="grp"><h4>الخلاصة</h4>
+          ${(() => {
+            const only = ids.filter(id => !pctOf(iA, id) || !pctOf(iB, id)).length;
+            const moved = ids.filter(id => pctOf(iA, id) && pctOf(iB, id) && pctOf(iA, id) !== pctOf(iB, id)).length;
+            const cA = recipeCost(A), cB = recipeCost(B);
+            return `<div class="tier ${only || moved ? 'y' : ''}"><span class="sw"></span><span class="t">
+              ${only ? `${only} نكهة تخصّ إحداهما فقط` : 'نفس النكهات'}${moved ? ` · ${moved} نسبة مختلفة` : ''}.
+              ${cA.complete && cB.complete ? `التكلفة: ${cA.total.toFixed(1)} مقابل ${cB.total.toFixed(1)}.` : ''}
+            </span></div>`; })()}
+          <button class="btn ghost" id="cmpAgain" style="width:100%;margin-top:10px">قارن بوصفة أخرى</button>
+        </div>`}`;
+    if (!B) {
+      const render = q => {
+        const el = document.getElementById('cmpList');
+        const list = allRecipes().filter(r => RKEY(r) !== keyA &&
+          (!q || r.name.toLowerCase().includes(q.toLowerCase()))).slice(0, 30);
+        el.innerHTML = list.map(r => `<div class="flav" data-cmp="${RKEY(r)}">
+          <span class="stripe" style="background:${catColor(r.category || 'من تصميمي')}"></span>
+          <span class="main"><span class="nm"><span class="rno num">${rNum(r)}</span><bdi>${r.name}</bdi></span>
+            <span class="meta">${(r.category || 'من تصميمي')}</span></span></div>`).join('')
+          || '<div class="empty">لا نتيجة.</div>';
+        el.querySelectorAll('[data-cmp]').forEach(b => b.onclick = () => { keyB = b.dataset.cmp; draw(); });
+      };
+      document.getElementById('cmpQ').oninput = e => render(e.target.value);
+      render('');
+    } else document.getElementById('cmpAgain').onclick = () => { keyB = null; draw(); };
+  };
+  draw();
+  scrim.classList.add('on'); sheet.classList.add('on'); document.body.style.overflow = 'hidden';
+}
+
 function openTin(id, fromList) {
   const f = DATA.flavors.find(x => x.id === id); if (!f) return;
   const back = fromList ? sheetGoBack : () => openSheet(id);
@@ -3590,6 +3965,10 @@ function openTin(id, fromList) {
          `<button class="qchip ${pack === g ? 'on' : ''}" data-pk="${g}">${g}غ</button>`).join('')}</div></div>
      <div class="grp"><h4>تصحيح يدوي</h4>
        <div class="search"><input id="tinRem" type="number" min="0" max="${pack}" value="${Math.round(i.remG)}" style="padding-inline-start:14px"></div>
+     </div>
+     <div class="grp"><h4>سعر العلبة (اختياري)</h4>
+       <div class="search"><input id="tinPrice" type="number" min="0" step="0.5" placeholder="مثال: 45" value="${i.price || ''}" style="padding-inline-start:14px"></div>
+       <div class="note" style="margin-top:8px">يُستخدم لحساب تكلفة كل جلسة. اتركه فارغاً إن لم يهمّك.</div>
        <div class="src" style="margin-top:8px"><span>لو وزنت العلبة فعلياً واختلف الرقم.</span></div></div>
      <div style="display:flex;gap:10px;margin-top:18px">
        <button class="btn ghost" id="tinOk">احفظ التصحيح</button>
@@ -3603,6 +3982,8 @@ function openTin(id, fromList) {
       // consumed is derived from what is actually left, so a manual correction
       // keeps the two numbers consistent instead of drifting apart
       i.usedG = Math.max(0, pack - i.remG);
+      const pr = parseFloat(document.getElementById('tinPrice').value);
+      i.price = isFinite(pr) && pr > 0 ? pr : null;
       save(true); back(); renderList(); renderLog(); toast('حُدّث المخزون', 'ok');
     };
   };
@@ -3705,6 +4086,8 @@ const BACKEND_AR = { artifact: 'مساحة المعاينة', indexeddb: 'Indexe
 
 function openSettings() {
   const lows = DATA.flavors.filter(f => isLow(f.id));
+  const gone = DATA.flavors.filter(f => isEmpty(f.id));
+  const nearOut = lows.filter(f => !isEmpty(f.id));
   const used = DATA.flavors.filter(f => invOf(f.id).remG < invOf(f.id).packG).length;
   const d = daysSinceBackup();
   const warn = Backend.name === 'memory';
