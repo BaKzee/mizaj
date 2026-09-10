@@ -1,8 +1,3 @@
-/* دليل المزّاج — service worker (self-updating)
-   No version number to remember. The app shell is checked against the
-   network on every online launch; everything else is served from cache
-   first. Offline behaviour is unchanged: instant, from the device. */
-
 const CACHE = 'mizaj';
 const SHELL = [
   './',
@@ -31,8 +26,6 @@ self.addEventListener('activate', e => {
   );
 });
 
-/* the document itself: network first, so a fresh upload is picked up
-   without any version bump. Falls straight back to cache when offline. */
 const isDoc = req =>
   req.mode === 'navigate' ||
   req.destination === 'document' ||
@@ -45,7 +38,6 @@ self.addEventListener('fetch', e => {
   if (isDoc(req)) {
     e.respondWith((async () => {
       try {
-        // a short leash: a slow network must never block the app from opening
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), 3500);
         const res = await fetch(req, { cache: 'no-store', signal: ctrl.signal });
@@ -63,7 +55,6 @@ self.addEventListener('fetch', e => {
     return;
   }
 
-  // assets: cache first, refreshed quietly in the background
   e.respondWith(
     caches.match(req).then(hit => {
       const net = fetch(req).then(res => {
@@ -78,7 +69,6 @@ self.addEventListener('fetch', e => {
   );
 });
 
-/* tell the open tab only when the file genuinely changed */
 let lastLen = null;
 async function notifyIfChanged(res) {
   try {
