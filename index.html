@@ -2756,7 +2756,41 @@ function answerPhaseCheck(s, at, flavorId, flavorName) {
   toast(flavorId ? `سُجّل: ${flavorName}` : 'تجاوزتها');
 }
 
+/* renderSession used to be the only entry point — if anything inside it
+   threw (a stale recipe reference, an odd session shape from an older
+   app version, etc.), the session screen was left blank/stale with no
+   way to open it AND no way to cancel the session, since starting a new
+   one is correctly blocked while one is "active". This wrapper guarantees
+   there is always at least a way out: Cancel or End. */
 function renderSession() {
+  try {
+    renderSessionInner();
+  } catch (e) {
+    console.error('renderSession failed — showing minimal fallback:', e);
+    const s = STATE.session;
+    if (!s) { sesScreen.innerHTML = ''; return; }
+    sesScreen.innerHTML = `
+      <div class="alert ban" style="margin-bottom:14px">
+        <b>تعذّر عرض تفاصيل الجلسة</b>
+        <p>الجلسة ما زالت مسجّلة، لكن صار خطأ بعرض تفاصيلها. تقدر تنهيها أو تلغيها من هنا.</p>
+      </div>
+      <div style="display:flex;gap:10px;margin:18px 0 6px">
+        <button class="btn ghost" id="sCancel">ألغِ</button>
+        <button class="btn solid" id="sEnd">أنهِ وقيّم</button>
+      </div>`;
+    const cancelBtn = document.getElementById('sCancel');
+    if (cancelBtn) cancelBtn.onclick = () => {
+      if (sesTimer) { clearInterval(sesTimer); sesTimer = null; }
+      keepAwake(false);
+      STATE.session = null; save(true); renderRecipes(); renderHome();
+      toast('أُلغيت الجلسة');
+    };
+    const endBtn = document.getElementById('sEnd');
+    if (endBtn) endBtn.onclick = () => endSession(true);
+  }
+}
+
+function renderSessionInner() {
   const s = STATE.session;
   if (!s) { sesScreen.innerHTML = ''; return; }
   const r = allRecipes().find(x => RKEY(x) === s.key);
@@ -3421,7 +3455,10 @@ function renderHome() {
   hScreen.querySelectorAll('[data-hopen]').forEach(b => b.onclick = () => { goTo('recipes'); clearSheetStack(); openRecipe(b.dataset.hopen); });
   hScreen.querySelectorAll('[data-hstock]').forEach(b => b.onclick = () => { goTo('log'); clearSheetStack(); lView = 'stock'; renderLog(); });
   const rs = document.getElementById('hResume');
-  if (rs) rs.onclick = () => { renderSession(); goTo('session'); };
+  if (rs) rs.onclick = () => {
+    try { renderSession(); } catch (e) { console.error('renderSession threw on resume tap:', e); }
+    goTo('session');
+  };
   const hs = document.getElementById('hStock');
   if (hs) hs.onclick = e => {
     // الضغط على تنبيه النفاد يفتح المخزون مُرشَّحاً على الناقص مباشرة
