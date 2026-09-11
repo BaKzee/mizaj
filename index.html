@@ -4713,24 +4713,39 @@ const BOOT_TIMEOUT_MS = 4000;
 let _bootRendered = false;
 
 function finishBoot(){
-  if(STATE.draft){
-    BUILD.picks = STATE.draft
-      .map(d=>({f:DATA.flavors.find(x=>x.id===d.id), pct:d.pct}))
-      .filter(p=>p.f);
-  }
-  STATE.ratings = STATE.ratings || {};
-  renderBuild();
-  renderList();
-  STATE.edits = STATE.edits || {};
-  (STATE.userFlavors || []).forEach(f => { if (!DATA.flavors.some(x => x.id === f.id)) DATA.flavors.push(f); });
-  applyBridgeRolesToLibrary();
-  compactSpecialNumbers();
-  renderChips();
-  renderRecipes();
-  if (STATE.session) { renderSession(); renderTabs(); }
-  renderHome();
-  renderLog();
-  updateBackupBadge();
+  // each step runs in isolation: if real saved data trips a bug in ONE
+  // step (e.g. a malformed session, an old inventory entry, a recipe id
+  // that no longer resolves), the others still run — most importantly
+  // renderHome(), which is what replaces the static loading skeleton.
+  // A failure here used to silently abort everything after it, leaving
+  // the app stuck on the skeleton forever with zero visible error.
+  const step = (name, fn) => {
+    try { fn(); }
+    catch (e) { console.error('finishBoot: "' + name + '" failed —', e); }
+  };
+
+  step('draft', () => {
+    if (STATE.draft) {
+      BUILD.picks = STATE.draft
+        .map(d => ({ f: DATA.flavors.find(x => x.id === d.id), pct: d.pct }))
+        .filter(p => p.f);
+    }
+    STATE.ratings = STATE.ratings || {};
+  });
+  step('renderBuild', renderBuild);
+  step('renderList', renderList);
+  step('userFlavors merge', () => {
+    STATE.edits = STATE.edits || {};
+    (STATE.userFlavors || []).forEach(f => { if (!DATA.flavors.some(x => x.id === f.id)) DATA.flavors.push(f); });
+  });
+  step('applyBridgeRolesToLibrary', applyBridgeRolesToLibrary);
+  step('compactSpecialNumbers', compactSpecialNumbers);
+  step('renderChips', renderChips);
+  step('renderRecipes', renderRecipes);
+  step('session render', () => { if (STATE.session) { renderSession(); renderTabs(); } });
+  step('renderHome', renderHome);
+  step('renderLog', renderLog);
+  step('updateBackupBadge', updateBackupBadge);
 }
 
 const _bootPromise = bootStorage();
@@ -4746,7 +4761,7 @@ Promise.race([
     toast('تعذّر تحميل بياناتك المحفوظة بسرعة — فُتح التطبيق مؤقتاً، وسيتحدّث تلقائياً إذا اكتمل التحميل بعد قليل', 'warn');
   }
   finishBoot();
-  registerSW();
+  try { registerSW(); } catch (e) { console.error('registerSW failed:', e); }
 });
 
 /* if the real load only finishes after the timeout already opened the
