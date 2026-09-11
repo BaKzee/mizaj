@@ -639,10 +639,22 @@ function goTo(n){
   if(cur===next)return;
   if(!cur){next.classList.add('active');return;}
   cur.classList.add('leaving');
-  cur.addEventListener('animationend',()=>{
+  // the screen switch used to happen ONLY inside this animationend callback —
+  // if the 'fall' animation ever gets skipped or cancelled (reduced-motion
+  // edge cases, a backgrounded/suspended tab resuming, GPU/compositor
+  // hiccups), the event never fires and the app is stuck on the old screen
+  // forever with no way to navigate. The timeout below guarantees the
+  // switch happens regardless, shortly after the .16s animation would have
+  // finished anyway.
+  let _switched = false;
+  const _doSwitch = () => {
+    if (_switched) return;
+    _switched = true;
     cur.classList.remove('active','leaving');
     next.classList.add('active');
-  },{once:true});
+  };
+  cur.addEventListener('animationend', _doSwitch, {once:true});
+  setTimeout(_doSwitch, 350);
 }
 (function restoreLastTab(){
   const saved = localStorage.getItem('mizaj:lastTab');
